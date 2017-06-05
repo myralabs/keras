@@ -12,6 +12,7 @@ import os
 import re
 import inspect
 from six.moves import zip
+import traceback
 
 from .. import backend as K
 from .. import initializers
@@ -19,6 +20,7 @@ from ..utils.io_utils import ask_to_proceed_with_overwrite
 from ..utils.layer_utils import print_summary as print_layer_summary
 from ..utils import conv_utils
 from ..legacy import interfaces
+from IPython import embed as embed_ipython
 
 try:
     import h5py
@@ -386,8 +388,10 @@ class Layer(object):
             The created weight variable.
         """
         initializer = initializers.get(initializer)
+        print("VIKSIT: >>>>>>>>>>>>>>>> ", dtype)
         if dtype is None:
             dtype = K.floatx()
+        print("dtype: ", dtype)
         weight = K.variable(initializer(shape), dtype=dtype, name=name)
         if regularizer is not None:
             self.add_loss(regularizer(weight))
@@ -413,24 +417,13 @@ class Layer(object):
             ValueError: in case of mismatch between
                 the provided inputs and the expectations of the layer.
         """
-        inputs = _to_list(inputs)
-        for x in inputs:
-            try:
-                K.is_keras_tensor(x)
-            except ValueError:
-                raise ValueError('Layer ' + self.name + ' was called with '
-                                 'an input that isn\'t a symbolic tensor. '
-                                 'Received type: ' +
-                                 str(type(x)) + '. Full input: ' +
-                                 str(inputs) + '. All inputs to the layer '
-                                 'should be tensors.')
-
         if not self.input_spec:
             return
         if not isinstance(self.input_spec, (list, tuple)):
             input_spec = _to_list(self.input_spec)
         else:
             input_spec = self.input_spec
+        inputs = _to_list(inputs)
         if len(inputs) != len(input_spec):
             raise ValueError('Layer ' + self.name + ' expects ' +
                              str(len(input_spec)) + ' inputs, '
@@ -1370,7 +1363,7 @@ def Input(shape=None, batch_shape=None,
     attributes that allow us to build a Keras model
     just by knowing the inputs and outputs of the model.
 
-    For instance, if a, b and c are Keras tensors,
+    For instance, if a, b and c and Keras tensors,
     it becomes possible to do:
     `model = Model(input=[a, b], output=c)`
 
@@ -1493,18 +1486,12 @@ class Container(Layer):
             self.outputs = [outputs]
 
         # Check for redundancy in inputs.
-        if len(set(self.inputs)) != len(self.inputs):
+        inputs_set = set(self.inputs)
+        if len(inputs_set) != len(self.inputs):
             raise ValueError('The list of inputs passed to the model '
                              'is redundant. '
                              'All inputs should only appear once.'
                              ' Found: ' + str(self.inputs))
-
-        # Check for redundancy in outputs.
-        if len(set(self.outputs)) != len(self.outputs):
-            warnings.warn('The list of outputs passed to the model '
-                          'is redundant. '
-                          'All outputs should only appear once.'
-                          ' Found: ' + str(self.outputs))
 
         # List of initial layers (1 to 1 mapping with self.inputs,
         # hence the same layer might appear twice)
@@ -1678,6 +1665,7 @@ class Container(Layer):
                 layer = node.inbound_layers[i]
                 node_index = node.node_indices[i]
                 tensor_index = node.tensor_indices[i]
+                next_node = layer.inbound_nodes[node_index]
                 build_map_of_graph(x, finished_nodes, nodes_in_progress,
                                    layer, node_index, tensor_index)
 
@@ -1695,15 +1683,6 @@ class Container(Layer):
             # If the depth is not set, the node has no outbound nodes (depth 0).
             depth = nodes_depths.setdefault(node, 0)
 
-            # Update the depth of the corresponding layer
-            previous_depth = layers_depths.get(node.outbound_layer, 0)
-            # If we've seen this layer before at a higher depth, we should use that depth instead
-            # of the node depth.  This is necessary for shared layers that have inputs at different
-            # depth levels in the graph.
-            depth = max(depth, previous_depth)
-            layers_depths[node.outbound_layer] = depth
-            nodes_depths[node] = depth
-
             # Update the depth of inbound nodes.
             for i in range(len(node.inbound_layers)):
                 inbound_layer = node.inbound_layers[i]
@@ -1711,6 +1690,10 @@ class Container(Layer):
                 inbound_node = inbound_layer.inbound_nodes[node_index]
                 previous_depth = nodes_depths.get(inbound_node, 0)
                 nodes_depths[inbound_node] = max(depth + 1, previous_depth)
+
+            # Update the depth of the corresponding layer
+            previous_depth = layers_depths.get(node.outbound_layer, 0)
+            layers_depths[node.outbound_layer] = max(depth, previous_depth)
 
         # Build a dict {depth: list of nodes with this depth}
         nodes_by_depth = {}
@@ -2768,7 +2751,9 @@ def save_weights_to_hdf5_group(f, layers):
     f.attrs['backend'] = K.backend().encode('utf8')
     f.attrs['keras_version'] = str(keras_version).encode('utf8')
 
+    print("--------- save weights to hdf5 group ---------")
     for layer in layers:
+        print("layer name: ", layer.name)
         g = f.create_group(layer.name)
         symbolic_weights = layer.weights
         weight_values = K.batch_get_value(symbolic_weights)
@@ -2781,13 +2766,25 @@ def save_weights_to_hdf5_group(f, layers):
             weight_names.append(name.encode('utf8'))
         g.attrs['weight_names'] = weight_names
         for name, val in zip(weight_names, weight_values):
-            param_dset = g.create_dataset(name, val.shape,
+            try:
+                print("val: name, shape: ", name, val.shape)
+                print("val dtype: ", val.dtype)
+                # if dtype is object, we know it must have been string
+                # we can fix this later
+                if (val.dtype.type is np.object_):
+                    val = val.astype("string")
+                print("viksit: create dataset with %s, %s, %s", name, val.shape, val.dtype)
+                param_dset = g.create_dataset(name, val.shape,
                                           dtype=val.dtype)
-            if not val.shape:
-                # scalar
-                param_dset[()] = val
-            else:
-                param_dset[:] = val
+                if not val.shape:
+                    # scalar
+                    param_dset[()] = val
+                else:
+                    param_dset[:] = val
+            except:
+                #embed_ipython()
+                traceback.print_exc()
+                raise
 
 
 def preprocess_weights_for_loading(layer, weights,
@@ -2910,20 +2907,16 @@ def preprocess_weights_for_loading(layer, weights,
                                                     (2, 3, 1, 0))
                 weights = [kernel, recurrent_kernel, bias]
 
-    conv_layers = ['Conv1D',
-                   'Conv2D',
-                   'Conv3D',
-                   'Conv2DTranspose',
-                   'ConvLSTM2D']
-    if layer.__class__.__name__ in conv_layers:
-        if original_backend and K.backend() != original_backend:
+    if original_backend and K.backend() != original_backend:
+        conv_layers = ['Conv1D',
+                       'Conv2D',
+                       'Conv3D',
+                       'Conv2DTranspose']
+        if layer.__class__.__name__ in conv_layers:
             weights[0] = conv_utils.convert_kernel(weights[0])
-            if layer.__class__.__name__ == 'ConvLSTM2D':
-                weights[1] = conv_utils.convert_kernel(weights[1])
-        if K.int_shape(layer.weights[0]) != weights[0].shape:
-            weights[0] = np.transpose(weights[0], (3, 2, 0, 1))
-            if layer.__class__.__name__ == 'ConvLSTM2D':
-                weights[1] = np.transpose(weights[1], (3, 2, 0, 1))
+        if layer.__class__.__name__ == 'ConvLSTM2D':
+            weights[0] = conv_utils.convert_kernel(weights[0])
+            weights[1] = conv_utils.convert_kernel(weights[1])
     return weights
 
 
